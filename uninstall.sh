@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -u
 
-SERVICE_BASE="probe204"
+# probe204 uninstall.sh
+# VERSION: 2026-04-26-fixed-process-cleanup-v2
+
 SERVICE_NAME="probe204.service"
+SERVICE_SHORT="probe204"
 INSTALL_DIR="/opt/probe"
 UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}"
-PORT_DEFAULT="18080"
+PROBE_SCRIPT="${INSTALL_DIR}/probe.py"
+DEFAULT_PORT="18080"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -17,8 +21,8 @@ info() { echo -e "${GREEN}[OK]${NC} $*"; }
 warn() { echo -e "${YELLOW}[ВНИМАНИЕ]${NC} $*"; }
 err()  { echo -e "${RED}[ОШИБКА]${NC} $*" >&2; }
 
-require_root_or_sudo() {
-  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+need_root_or_sudo() {
+  if [[ "${EUID}" -eq 0 ]]; then
     return 0
   fi
 
@@ -36,73 +40,52 @@ require_root_or_sudo() {
 
 stop_systemd_service() {
   if command -v systemctl >/dev/null 2>&1; then
-    echo "Останавливаю службу ${SERVICE_NAME}, если она зарегистрирована..."
+    echo "Останавливаю службу ${SERVICE_SHORT}, если она есть..."
 
+    # Важно: даже если unit-файл уже удалён, systemd может ещё держать процесс в памяти.
     systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
     systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
-
-    # На случай если systemd ещё держит состояние удалённого unit
     systemctl reset-failed "${SERVICE_NAME}" 2>/dev/null || true
   else
-    warn "systemctl не найден, пропускаю systemd-остановку."
+    warn "systemctl не найден, пропускаю остановку через systemd."
   fi
 }
 
 kill_leftover_processes() {
   echo "Проверяю оставшиеся процессы probe204..."
 
-  local pids=""
+  local pids
   pids="$(pgrep -f "/opt/probe/probe.py" 2>/dev/null || true)"
 
-  if [ -n "$pids" ]; then
-    warn "Найдены оставшиеся процессы probe204: $pids"
-    kill $pids 2>/dev/null || true
+  if [[ -n "${pids}" ]]; then
+    warn "Найдены оставшиеся процессы probe204: ${pids}"
+    echo "${pids}" | xargs -r kill 2>/dev/null || true
     sleep 1
 
-    local still=""
-    still="$(pgrep -f "/opt/probe/probe.py" 2>/dev/null || true)"
-    if [ -n "$still" ]; then
-      warn "Некоторые процессы не завершились мягко, выполняю kill -9: $still"
-      kill -9 $still 2>/dev/null || true
+    pids="$(pgrep -f "/opt/probe/probe.py" 2>/dev/null || true)"
+    if [[ -n "${pids}" ]]; then
+      warn "Процессы не завершились штатно, выполняю kill -9: ${pids}"
+      echo "${pids}" | xargs -r kill -9 2>/dev/null || true
     fi
   else
     info "Оставшихся процессов probe204 не найдено"
   fi
 }
 
-kill_port_listener() {
-  local port="$1"
-
-  if ! command -v ss >/dev/null 2>&1; then
-    return 0
-  fi
-
-  local pids=""
-  pids="$(ss -lntp 2>/dev/null \
-    | awk -v p=":${port}" '$4 ~ p {print $0}' \
-    | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' \
-    | sort -u)"
-
-  if [ -n "$pids" ]; then
-    warn "Порт ${port}/tcp всё ещё слушается процессами: $pids"
-    warn "Останавливаю эти процессы..."
-    kill $pids 2>/dev/null || true
-    sleep 1
-
-    local still=""
-    still="$(ss -lntp 2>/dev/null \
-      | awk -v p=":${port}" '$4 ~ p {print $0}' \
-      | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' \
-      | sort -u)"
-
-    if [ -n "$still" ]; then
-      warn "Процессы всё ещё слушают порт, выполняю kill -9: $still"
-      kill -9 $still 2>/dev/null || true
+detect_port_from_probe() {
+  if [[ -f "${PROBE_SCRIPT}" ]]; then
+    local port
+    port="$(grep -Eo 'HTTPServer\(\("0\.0\.0\.0", *[0-9]+' "${PROBE_SCRIPT}" 2>/dev/null | grep -Eo '[0-9]+$' | tail -n 1 || true)"
+    if [[ -n "${port}" ]]; then
+      echo "${port}"
+      return 0
     fi
   fi
+
+  echo "${DEFAULT_PORT}"
 }
 
-remove_files() {
+cleanup_files() {
   echo "Удаляю файлы probe204..."
 
   rm -f "${UNIT_FILE}" 2>/dev/null || true
@@ -117,50 +100,61 @@ remove_files() {
 }
 
 final_check() {
+  local port="$1"
+
   echo
   echo "Финальная проверка:"
 
   if command -v systemctl >/dev/null 2>&1; then
-    if systemctl list-unit-files "${SERVICE_NAME}" 2>/dev/null | grep -q "^${SERVICE_NAME}"; then
-      warn "Unit ${SERVICE_NAME} всё ещё виден systemd."
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+      err "Служба ${SERVICE_NAME} всё ещё активна"
     else
-      info "Unit ${SERVICE_NAME} не зарегистрирован"
+      info "Служба ${SERVICE_NAME} не активна"
     fi
   fi
 
-  if [ -d "${INSTALL_DIR}" ]; then
-    warn "Каталог ${INSTALL_DIR} всё ещё существует"
+  if [[ -e "${UNIT_FILE}" ]]; then
+    err "Unit-файл всё ещё существует: ${UNIT_FILE}"
   else
-    info "Каталог ${INSTALL_DIR} отсутствует"
+    info "Unit-файл удалён"
+  fi
+
+  if [[ -d "${INSTALL_DIR}" ]]; then
+    err "Каталог всё ещё существует: ${INSTALL_DIR}"
+  else
+    info "Каталог ${INSTALL_DIR} удалён"
   fi
 
   if command -v ss >/dev/null 2>&1; then
-    if ss -lntp 2>/dev/null | grep -q ":${PORT_DEFAULT} "; then
-      warn "Порт ${PORT_DEFAULT}/tcp всё ещё слушается. Проверьте: sudo ss -lntp | grep ${PORT_DEFAULT}"
+    if ss -lntp 2>/dev/null | grep -q ":${port} "; then
+      err "Порт ${port} всё ещё слушается:"
+      ss -lntp 2>/dev/null | grep ":${port} " || true
     else
-      info "Порт ${PORT_DEFAULT}/tcp не слушается"
+      info "Порт ${port} не слушается"
     fi
+  else
+    warn "Команда ss не найдена, проверка порта пропущена"
   fi
-
-  echo
-  info "Удаление probe204 завершено"
 }
 
 main() {
-  require_root_or_sudo "$@"
+  need_root_or_sudo "$@"
 
-  echo "${BOLD}Удаление probe204${NC}"
   echo
+  echo -e "${BOLD}Удаление probe204${NC}"
+  echo "Версия uninstall: 2026-04-26-fixed-process-cleanup-v2"
+  echo
+
+  local port
+  port="$(detect_port_from_probe)"
 
   stop_systemd_service
   kill_leftover_processes
+  cleanup_files
+  final_check "${port}"
 
-  # Специально добиваем дефолтный порт: полезно после старого uninstall,
-  # когда unit уже удалён, но python-процесс ещё жив.
-  kill_port_listener "${PORT_DEFAULT}"
-
-  remove_files
-  final_check
+  echo
+  info "probe204 удалён"
 }
 
 main "$@"
