@@ -20,11 +20,11 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 info() { echo -e "${GREEN}[OK]${NC} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
-fail() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+warn() { echo -e "${YELLOW}[ВНИМАНИЕ]${NC} $*"; }
+fail() { echo -e "${RED}[ОШИБКА]${NC} $*" >&2; exit 1; }
 
 need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || fail "Required command not found: $1"
+  command -v "$1" >/dev/null 2>&1 || fail "Не найдена необходимая команда: $1"
 }
 
 detect_original_user() {
@@ -50,22 +50,25 @@ require_root_or_sudo() {
   fi
 
   need_cmd sudo
-  warn "Need root privileges. Requesting sudo..."
+  warn "Для установки нужны права root:"
 
-  # Do not re-exec "$0": with bash <(curl ...), "$0" may be /dev/fd/63,
-  # which disappears after sudo boundary. Re-download to a real temp file.
   local tmp_installer
   tmp_installer="$(mktemp /tmp/probe204-install.XXXXXX.sh)"
 
-  if command -v curl >/dev/null 2>&1; then
+  # Важно: при запуске вида bash <(curl ...), $0 обычно равен /dev/fd/63.
+  # Его нельзя запускать заново после sudo, но его можно скопировать ДО перехода через sudo.
+  if [[ -r "$0" ]]; then
+    cp "$0" "$tmp_installer"
+  elif command -v curl >/dev/null 2>&1; then
     curl -fsSL "${REPO_RAW_BASE}/install.sh" -o "$tmp_installer"
   elif command -v wget >/dev/null 2>&1; then
     wget -qO "$tmp_installer" "${REPO_RAW_BASE}/install.sh"
   else
-    fail "curl or wget is required to request sudo automatically"
+    rm -f "$tmp_installer"
+    fail "Нужен sudo, а также curl или wget для автоповышения прав."
   fi
 
-  chmod +x "$tmp_installer"
+  chmod 0755 "$tmp_installer"
   exec sudo bash "$tmp_installer"
 }
 
@@ -92,7 +95,7 @@ ask_port() {
   local port
 
   while true; do
-    read -r -p "Enter probe TCP port [${default_port}]: " port || true
+    read -r -p "TCP-порт для probe204 [${default_port}]: " port || true
     port="${port:-$default_port}"
 
     if validate_port "$port"; then
@@ -100,7 +103,7 @@ ask_port() {
       return
     fi
 
-    warn "Invalid port. Please enter a number from 1 to 65535."
+    warn "Некорректный порт. Число от 1 до 65535."
   done
 }
 
@@ -108,7 +111,7 @@ write_probe_py() {
   local port="$1"
   mkdir -p "${INSTALL_DIR}"
 
-  cat > "${PROBE_FILE}" <<EOF
+  cat > "${PROBE_FILE}" <<EOF_PY
 #!/usr/bin/env python3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -132,7 +135,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
-EOF
+EOF_PY
 
   chmod 0755 "${PROBE_FILE}"
 }
@@ -140,7 +143,7 @@ EOF
 write_uninstall_sh() {
   mkdir -p "${INSTALL_DIR}"
 
-  cat > "${UNINSTALL_FILE}" <<'EOF'
+  cat > "${UNINSTALL_FILE}" <<'EOF_UNINSTALL'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
@@ -154,31 +157,31 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 info() { echo -e "${GREEN}[OK]${NC} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
-fail() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+warn() { echo -e "${YELLOW}[ВНИМАНИЕ]${NC} $*"; }
+fail() { echo -e "${RED}[ОШИБКА]${NC} $*" >&2; exit 1; }
 
 if [[ "${EUID}" -ne 0 ]]; then
-  fail "Run as root: sudo ${INSTALL_DIR}/uninstall.sh"
+  fail "Удаление с sudo: sudo ${INSTALL_DIR}/uninstall.sh"
 fi
 
 if systemctl list-unit-files | grep -q "^${SERVICE_NAME}.service"; then
-  systemctl disable --now "${SERVICE_NAME}" >/dev/null 2>&1 || warn "Could not stop/disable ${SERVICE_NAME}"
+  systemctl disable --now "${SERVICE_NAME}" >/dev/null 2>&1 || warn "Не удалось остановить/отключить ${SERVICE_NAME}"
 else
-  warn "Service ${SERVICE_NAME} is not registered"
+  warn "Служба ${SERVICE_NAME} не зарегистрирована"
 fi
 
 rm -f "${SERVICE_FILE}"
 rm -rf "${INSTALL_DIR}"
 systemctl daemon-reload
 
-info "probe204 has been removed"
-EOF
+info "probe204 удалён"
+EOF_UNINSTALL
 
   chmod 0755 "${UNINSTALL_FILE}"
 }
 
 write_service() {
-  cat > "${SERVICE_FILE}" <<EOF
+  cat > "${SERVICE_FILE}" <<EOF_SERVICE
 [Unit]
 Description=Simple HTTP 204 Probe Server
 After=network.target
@@ -192,7 +195,7 @@ User=root
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF_SERVICE
 }
 
 write_uninstall_instruction() {
@@ -203,24 +206,24 @@ write_uninstall_instruction() {
 
   local target_file="${user_home}/${UNINSTALL_INSTRUCTION_FILE}"
 
-  cat > "$target_file" <<EOF
-probe204 uninstall instructions
+  cat > "$target_file" <<EOF_TXT
+Инструкция по удалению probe204
 
-To remove probe204 from this server, run:
+Для удаления probe204 с этого сервера:
 
   sudo /opt/probe/uninstall.sh
 
-This will:
-- stop the probe204 systemd service;
-- disable autostart;
-- remove /etc/systemd/system/probe204.service;
-- remove /opt/probe;
-- reload systemd units.
+Скрипт удаления выполнит:
+- остановку systemd-службы probe204;
+- отключение автозапуска;
+- удаление /etc/systemd/system/probe204.service;
+- удаление каталога /opt/probe;
+- перезагрузку списка unit-файлов systemd.
 
-Check status before removal:
+Проверить статус перед удалением:
 
   systemctl status probe204 --no-pager
-EOF
+EOF_TXT
 
   chown "${original_user}:${original_user}" "$target_file" 2>/dev/null || true
   chmod 0644 "$target_file"
@@ -230,23 +233,24 @@ maybe_open_ufw() {
   local port="$1"
 
   if ! command -v ufw >/dev/null 2>&1; then
-    warn "ufw not found. Firewall was not changed."
+    warn "ufw не найден, firewall на сервере не изменялся."
     return
   fi
 
   if ufw status 2>/dev/null | grep -qi "Status: active"; then
-    read -r -p "ufw is active. Allow TCP port ${port}? [y/N]: " answer || true
+    local answer
+    read -r -p "ufw активен. Открыть TCP-порт ${port}? [y/N]: " answer || true
     case "${answer:-N}" in
-      y|Y|yes|YES)
+      y|Y|yes|YES|д|Д|да|ДА)
         ufw allow "${port}/tcp"
-        info "ufw rule added: ${port}/tcp"
+        info "Добавлено правило ufw: ${port}/tcp"
         ;;
       *)
-        warn "ufw rule was not added."
+        warn "Правило ufw не добавлено."
         ;;
     esac
   else
-    warn "ufw is installed but not active. Firewall was not changed."
+    warn "ufw установлен, но не активен. Firewall на сервере не изменялся."
   fi
 }
 
@@ -264,6 +268,8 @@ main() {
   default_port="$(get_current_port)"
   port="$(ask_port "$default_port")"
 
+  info "Устанавливаю probe204 в ${INSTALL_DIR}"
+
   write_probe_py "$port"
   write_uninstall_sh
   write_service
@@ -276,21 +282,21 @@ main() {
   maybe_open_ufw "$port"
 
   echo
-  info "probe204 installed"
-  echo "Service: ${SERVICE_NAME}"
-  echo "Port: ${port}/tcp"
-  echo "Local test:"
+  info "probe204 установлен"
+  echo "Служба: ${SERVICE_NAME}"
+  echo "Порт: ${port}/tcp"
+  echo "Локальная проверка:"
   echo "  curl -i http://127.0.0.1:${port}/generate_204"
   echo
-  echo "Uninstall command:"
+  echo "Удаление:"
   echo "  sudo ${UNINSTALL_FILE}"
   echo
   if [[ -n "${user_home}" ]]; then
-    echo "Uninstall instructions:"
+    echo "Инструкция по удалению создана здесь:"
     echo "  ${user_home}/${UNINSTALL_INSTRUCTION_FILE}"
   fi
   echo
-  echo -e "${RED}${BOLD}IMPORTANT: open TCP port ${port} in your hoster/cloud firewall/security group/router if remote access is required.${NC}"
+  echo -e "${RED}${BOLD}ВАЖНО: если нужен доступ извне, необходимо открыть TCP-порт ${port} в firewall сервера, панели хостера, cloud security group или на роутере/NAT.${NC}"
   echo
   systemctl --no-pager --full status "${SERVICE_NAME}" || true
 }
