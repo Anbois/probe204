@@ -55,12 +55,9 @@ require_root_or_sudo() {
   local tmp_installer
   tmp_installer="$(mktemp /tmp/probe204-install.XXXXXX.sh)"
 
-  # Важно:
-  # При запуске вида bash <(curl ...), $0 обычно равен /dev/fd/63.
-  # Это поток, который bash уже читает. Копировать его нельзя: во временный файл
-  # может попасть пустой файл или только хвост скрипта, после чего sudo-запуск
-  # завершится молча. Поэтому для /dev/fd и /proc/self/fd заново скачиваем
-  # установщик из GitHub raw. Обычный локальный файл можно копировать.
+  # При запуске bash <(curl ...) путь $0 обычно /dev/fd/NN или /proc/self/fd/NN.
+  # Такой поток нельзя надёжно повторно запускать после sudo, поэтому для этого случая
+  # скачиваем install.sh заново в обычный временный файл.
   if [[ "$0" == /dev/fd/* || "$0" == /proc/self/fd/* ]]; then
     if command -v curl >/dev/null 2>&1; then
       curl -fsSL "${REPO_RAW_BASE}/install.sh" -o "$tmp_installer"
@@ -68,7 +65,7 @@ require_root_or_sudo() {
       wget -qO "$tmp_installer" "${REPO_RAW_BASE}/install.sh"
     else
       rm -f "$tmp_installer"
-      fail "Нужен sudo, а также curl или wget для автоповышения прав."
+      fail "Нужен sudo, а также curl или wget для повторного запуска установщика."
     fi
   elif [[ -r "$0" ]]; then
     cp "$0" "$tmp_installer"
@@ -81,11 +78,7 @@ require_root_or_sudo() {
     fail "Нужен sudo, а также curl или wget для автоповышения прав."
   fi
 
-  if [[ ! -s "$tmp_installer" ]]; then
-    rm -f "$tmp_installer"
-    fail "Не удалось подготовить временный установщик."
-  fi
-
+  [[ -s "$tmp_installer" ]] || fail "Временный файл установщика пустой: $tmp_installer"
   chmod 0755 "$tmp_installer"
   exec sudo bash "$tmp_installer"
 }
@@ -121,7 +114,7 @@ ask_port() {
       return
     fi
 
-    warn "Некорректный порт. Число от 1 до 65535."
+    warn "Некорректный порт. Нужно число от 1 до 65535."
   done
 }
 
@@ -179,7 +172,7 @@ warn() { echo -e "${YELLOW}[ВНИМАНИЕ]${NC} $*"; }
 fail() { echo -e "${RED}[ОШИБКА]${NC} $*" >&2; exit 1; }
 
 if [[ "${EUID}" -ne 0 ]]; then
-  fail "Удаление с sudo: sudo ${INSTALL_DIR}/uninstall.sh"
+  fail "Удаление нужно запускать с sudo: sudo ${INSTALL_DIR}/uninstall.sh"
 fi
 
 if systemctl list-unit-files | grep -q "^${SERVICE_NAME}.service"; then
@@ -227,7 +220,7 @@ write_uninstall_instruction() {
   cat > "$target_file" <<EOF_TXT
 Инструкция по удалению probe204
 
-Для удаления probe204 с этого сервера:
+Для удаления probe204 с этого сервера выполните:
 
   sudo /opt/probe/uninstall.sh
 
@@ -272,6 +265,71 @@ maybe_open_ufw() {
   fi
 }
 
+local_http_test() {
+  local port="$1"
+  echo
+  echo "Локальный HTTP-тест:"
+  echo "  curl -i http://127.0.0.1:${port}/generate_204"
+
+  if command -v curl >/dev/null 2>&1; then
+    local http_code
+    http_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${port}/generate_204" 2>/dev/null || true)"
+    if [[ "$http_code" == "204" ]]; then
+      info "Локальная проверка пройдена: HTTP 204"
+    else
+      warn "Локальная проверка не пройдена. Получен HTTP-код: ${http_code:-нет ответа}"
+      warn "Проверьте: systemctl status ${SERVICE_NAME} --no-pager"
+    fi
+  else
+    warn "curl не найден, автоматическая локальная проверка пропущена."
+  fi
+}
+
+detect_external_ip() {
+  command -v curl >/dev/null 2>&1 || return 0
+
+  local ip
+  ip="$(curl -4fsS --max-time 4 https://ifconfig.me 2>/dev/null || true)"
+  if [[ ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    ip="$(curl -4fsS --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+  fi
+
+  if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo "$ip"
+  fi
+}
+
+print_external_check_instructions() {
+  local port="$1"
+  local external_ip="$2"
+  local target="SERVER_IP"
+
+  if [[ -n "$external_ip" ]]; then
+    target="$external_ip"
+  fi
+
+  echo
+  echo -e "${BOLD}Проверка снаружи:${NC}"
+  echo "С другого сервера / ПК выполните:"
+  echo
+  echo "  curl -i http://${target}:${port}/generate_204"
+  echo
+  echo "Ожидаемый ответ:"
+  echo "  HTTP/1.0 204 No Content"
+  echo
+  if [[ -n "$external_ip" ]]; then
+    echo "Определённый внешний IPv4 сервера: ${external_ip}"
+  else
+    warn "Внешний IPv4 автоматически определить не удалось. Замените SERVER_IP на публичный IP сервера."
+  fi
+  echo
+  echo "Если снаружи не отвечает:"
+  echo "  1. Откройте TCP-порт ${port} в ufw/firewall сервера."
+  echo "  2. Проверьте firewall панели VPS/хостера или cloud security group."
+  echo "  3. Проверьте NAT/port-forward, если сервер находится за роутером."
+  echo "  4. Убедитесь, что сервис слушает порт: sudo ss -lntp | grep ${port}"
+}
+
 main() {
   require_root_or_sudo
 
@@ -280,7 +338,7 @@ main() {
   need_cmd grep
   need_cmd getent
 
-  local original_user user_home default_port port
+  local original_user user_home default_port port external_ip
   original_user="$(detect_original_user)"
   user_home="$(get_user_home "$original_user")"
   default_port="$(get_current_port)"
@@ -294,17 +352,21 @@ main() {
   write_uninstall_instruction "$original_user" "$user_home"
 
   systemctl daemon-reload
-  systemctl enable --now "${SERVICE_NAME}"
+  systemctl enable --now "${SERVICE_NAME}" >/dev/null
   systemctl restart "${SERVICE_NAME}"
 
   maybe_open_ufw "$port"
+
+  external_ip="$(detect_external_ip || true)"
 
   echo
   info "probe204 установлен"
   echo "Служба: ${SERVICE_NAME}"
   echo "Порт: ${port}/tcp"
-  echo "Локальная проверка:"
-  echo "  curl -i http://127.0.0.1:${port}/generate_204"
+
+  local_http_test "$port"
+  print_external_check_instructions "$port" "$external_ip"
+
   echo
   echo "Удаление:"
   echo "  sudo ${UNINSTALL_FILE}"
