@@ -24,7 +24,8 @@ GET /generate_204 -> HTTP 204 No Content
 ## Быстрая установка
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/USERNAME/probe204/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/Anbois/probe204/main/install.sh)
+
 ```
 
 Замените `USERNAME` на имя вашего GitHub-аккаунта.
