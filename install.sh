@@ -50,14 +50,27 @@ require_root_or_sudo() {
   fi
 
   need_cmd sudo
-  warn "Для установки нужны права root:"
+  warn "Для установки нужны права root. Запрашиваю sudo..."
 
   local tmp_installer
   tmp_installer="$(mktemp /tmp/probe204-install.XXXXXX.sh)"
 
-  # Важно: при запуске вида bash <(curl ...), $0 обычно равен /dev/fd/63.
-  # Его нельзя запускать заново после sudo, но его можно скопировать ДО перехода через sudo.
-  if [[ -r "$0" ]]; then
+  # Важно:
+  # При запуске вида bash <(curl ...), $0 обычно равен /dev/fd/63.
+  # Это поток, который bash уже читает. Копировать его нельзя: во временный файл
+  # может попасть пустой файл или только хвост скрипта, после чего sudo-запуск
+  # завершится молча. Поэтому для /dev/fd и /proc/self/fd заново скачиваем
+  # установщик из GitHub raw. Обычный локальный файл можно копировать.
+  if [[ "$0" == /dev/fd/* || "$0" == /proc/self/fd/* ]]; then
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL "${REPO_RAW_BASE}/install.sh" -o "$tmp_installer"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -qO "$tmp_installer" "${REPO_RAW_BASE}/install.sh"
+    else
+      rm -f "$tmp_installer"
+      fail "Нужен sudo, а также curl или wget для автоповышения прав."
+    fi
+  elif [[ -r "$0" ]]; then
     cp "$0" "$tmp_installer"
   elif command -v curl >/dev/null 2>&1; then
     curl -fsSL "${REPO_RAW_BASE}/install.sh" -o "$tmp_installer"
@@ -66,6 +79,11 @@ require_root_or_sudo() {
   else
     rm -f "$tmp_installer"
     fail "Нужен sudo, а также curl или wget для автоповышения прав."
+  fi
+
+  if [[ ! -s "$tmp_installer" ]]; then
+    rm -f "$tmp_installer"
+    fail "Не удалось подготовить временный установщик."
   fi
 
   chmod 0755 "$tmp_installer"
