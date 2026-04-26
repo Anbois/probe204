@@ -120,9 +120,24 @@ sudo systemctl disable probe204
 
 ## Удаление
 
-```bash
-sudo systemctl disable --now probe204
-sudo rm -f /etc/systemd/system/probe204.service
-sudo rm -rf /opt/probe
-sudo systemctl daemon-reload
+Во время установки инсталлятор дополнительно кладёт в домашнюю папку пользователя краткую инструкцию по удалению:
+
+```text
+~/probe204-uninstall.txt
 ```
+
+Основной способ удаления:
+
+```bash
+sudo /opt/probe/uninstall.sh
+```
+
+Скрипт удаления выполняет:
+
+- остановку службы `probe204`;
+- отключение автозапуска;
+- удаление systemd unit `/etc/systemd/system/probe204.service`;
+- удаление файлов probe-сервера из `/opt/probe`;
+- перечитывание конфигурации systemd.
+
+Если файл инструкции в домашней папке был удалён вручную, это не мешает удалению: достаточно выполнить команду выше.
